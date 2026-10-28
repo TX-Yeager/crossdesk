@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crossdesk-lan"
+version = "0.2.10-rc1"
+description = "CrossDesk 跨屏：Windows 与 macOS 局域网双向键鼠互控"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=44,<51", "Pillow>=12,<14"]
+
+[project.gui-scripts]
+CrossDesk = "trustedhost:main"
+
+[tool.setuptools]
+py-modules = ["trustedhost", "runtime_host"]
+
+[tool.setuptools.packages.find]
+include = ["crossdesk", "crossdesk.*"]
+exclude = ["tests", "tests.*"]

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CrossDesk · 安装与权限</title>
+<style>
+:root{font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#20312d;background:#f3f6f3;line-height:1.75}body{max-width:1040px;margin:52px auto;padding:0 24px 60px}h1{font-size:40px;line-height:1.25;letter-spacing:-1px}h2{font-size:23px;margin-top:36px}h3{font-size:17px;margin-bottom:6px}p{margin:12px 0}.eyebrow{color:#35745c;font-size:13px;letter-spacing:2px}.lead{font-size:19px;color:#53645d;max-width:800px}.cards{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card,table{background:white;border:1px solid #dce5df;border-radius:16px}.card{padding:23px}table{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden}td,th{text-align:left;padding:15px;vertical-align:top;border-bottom:1px solid #e7ede8}th{background:#e8f0e9}tr:last-child td{border-bottom:0}.note{background:#fff4d9;border-left:4px solid #d4a74a;padding:14px 18px;border-radius:6px}.muted{font-size:14px;color:#62726a}code{font-family:Consolas,monospace;background:#edf3ee;padding:2px 5px;border-radius:4px}a{color:#21684a}li{margin:7px 0}@media(max-width:720px){.cards{grid-template-columns:1fr}body{margin-top:28px}h1{font-size:32px}td,th{padding:10px;font-size:14px}}
+</style>
+<div class="eyebrow">CROSSDESK / 安装指南 / 2026.10.28</div>
+<h1>两台电脑，各装一次。<br>Windows 网络权限由安装向导配置。</h1>
+<p class="lead">Windows 安装包默认自动配置防火墙，只需确认一次管理员授权。Mac 的辅助功能、输入监控权限由你在系统设置中开启。</p>
+<p class="note"><strong>版本：0.2.10-rc1 预览版。</strong>本次补充安装向导，应用核心与已有发布包相同。安装流程通过验证，不代表此前偶发跨屏问题已经彻底解决。已有安装请优先使用签名更新包，避免替换宿主、重新授权。</p>
+<div class="cards">
+<section class="card"><h2 style="margin-top:0">Windows · x64</h2><ol>
+<li>运行 <strong>CrossDesk-0.2.10-rc1-Windows-x64-Setup.exe</strong>，按向导安装。</li>
+<li>保留“自动配置 CrossDesk 的局域网连接”的勾选，在 Windows 管理员确认中选择“是”。标准账户可能需要管理员密码。</li>
+<li>从桌面或开始菜单打开 CrossDesk。取消授权也能完成文件安装，但需要稍后在开始菜单运行<strong>“修复局域网连接”</strong>。</li>
+</ol><p class="muted">安装到当前用户目录，带卸载入口，不添加开机自启；日常使用无需管理员权限。此预览安装包尚无商业代码签名，Windows 可能显示未识别发布者提示。请核对来源与 SHA256，不要关闭系统防护。</p></section>
+<section class="card"><h2 style="margin-top:0">Mac · Apple 芯片</h2><ol>
+<li>打开 <strong>CrossDesk-macOS-arm64.dmg</strong>，将 CrossDesk 拖到 Applications（应用程序）。</li>
+<li>从“应用程序”打开 CrossDesk，再进入<strong>系统设置 → 隐私与安全性</strong>，分别在<strong>辅助功能、输入监控</strong>中允许 CrossDesk。</li>
+<li>完全退出并重新打开 CrossDesk。如弹出“本地网络”或网络传入连接请求，允许 CrossDesk。</li>
+</ol><p class="muted">先安装到固定位置，再授权；不要直接从 DMG 内运行。只构建验证了 Apple Silicon / arm64，未验证 Intel Mac。当前包使用临时签名，未做 Apple Developer ID 公证；首次打开可能需要按系统“隐私与安全性”的说明确认“仍要打开”。不要关闭 Gatekeeper 或 SIP。</p></section>
+</div>
+<h2>每台电脑需要哪些权限</h2>
+<table><thead><tr><th>权限 / 能力</th><th>Windows</th><th>macOS</th></tr></thead><tbody>
+<tr><td>读取与控制键盘、鼠标</td><td>普通桌面直接使用，无须另开辅助功能或输入监控权限。</td><td><strong>辅助功能 + 输入监控：必需。</strong>授权对象为安装后的 CrossDesk.app。</td></tr>
+<tr><td>局域网连接</td><td><strong>安装器自动添加专用规则。</strong>仅此程序、专用网络、同一子网；TCP 48193 与 UDP 48194 入站。不会开放公用网络或关闭防火墙。</td><td>系统提示本地网络权限时允许；开启系统防火墙且被询问时，允许 CrossDesk 传入连接。</td></tr>
+<tr><td>管理员授权</td><td>仅配置或移除防火墙规则时需要。正常运行不需要。</td><td>系统可能要求确认隐私权限。安装包不能静默替你授权辅助功能、输入监控。</td></tr>
+<tr><td>录屏、麦克风、摄像头</td><td colspan="2">键鼠跨屏不需要这些权限。</td></tr>
+<tr><td>文件与剪贴板</td><td colspan="2">剪贴板共享为应用内可选功能。文件仍受系统权限限制；Mac 访问受保护文件夹时按需允许。基础跨屏不要求“完全磁盘访问权限”。</td></tr>
+<tr><td>锁屏、管理员窗口</td><td>普通权限不能保证控制提权应用、UAC 安全桌面或登录界面；使用该电脑自己的键鼠处理。</td><td>登录、锁屏和受保护的系统界面仍可能要求本机操作。</td></tr>
+</tbody></table>
+<h2>首次连接</h2>
+<ol><li>两台电脑连接同一个可信家庭或办公室局域网，并打开 CrossDesk。</li><li>按应用内的设备发现与配对码流程连接，核对目标设备。</li><li>在布局中将两台电脑的屏幕摆成实际相邻的位置，再开始共享。</li><li>将鼠标移到相邻边缘即可跨屏。按 <strong>F12</strong> 停止共享；Mac 键盘设置不同，可能需要 <strong>fn + F12</strong>。</li></ol>
+<h2>网络配置后仍连不上</h2>
+<ul><li><strong>当前网络是“公用”：</strong>只有确认是可信网络时，才在 Windows“设置 → 网络和 Internet → 当前连接的属性”中改为“专用”。安装器不会替你判断一个网络是否可信。</li><li><strong>取消过管理员确认：</strong>从开始菜单打开“CrossDesk → 修复局域网连接”，完成授权。配置结果会明确提示；详细失败信息（如有）在安装目录 <code>firewall-result.txt</code>。</li><li><strong>公司策略或安全软件拦截：</strong>请管理员按本页规则放行。安装器不会覆盖公司组策略或第三方防火墙。</li><li><strong>改过监听端口 / 跨子网 / 访客 Wi‑Fi：</strong>默认规则只覆盖 TCP 48193、UDP 48194 和同一子网。自定义端口需同步调整规则；访客网络的设备隔离也可能阻止互连。</li></ul>
+<h2>更新与卸载</h2>
+<p>已有安装使用同版本发布目录中的 <code>.crossdesk-update</code> 签名功能包升级。新安装器不会覆盖非空目录，也不会自动重装当前运行的 CrossDesk。</p>
+<p>Windows 从“设置 → 应用 → 已安装的应用”卸载。请先退出 CrossDesk；移除本安装创建的防火墙规则时会请求管理员确认。取消时卸载会停止，方便重新授权后完整清理。用户配置与配对记录保留在 <code>%LOCALAPPDATA%\CrossDesk</code>，其他应用的规则不受影响。</p>
+<p>Mac 退出应用后可从“应用程序”移除 CrossDesk。隐私设置中的授权可在系统设置中撤销。不要为重装清空系统隐私数据库。</p>
+<h2>系统说明来源</h2>
+<p class="muted">权限与网络规则按当前 CrossDesk 源码核对，并参考：<a href="https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac">Apple 辅助功能</a> · <a href="https://support.apple.com/guide/mac-help/control-access-to-input-monitoring-on-mac-mchl4cedafb6/mac">Apple 输入监控</a> · <a href="https://support.apple.com/guide/mac-help/control-access-to-your-local-network-on-mac-mchla4f49138/mac">Apple 本地网络</a> · <a href="https://support.apple.com/en-gb/102445">Apple 安全打开应用</a> · <a href="https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule">Microsoft 防火墙规则</a> · <a href="https://support.microsoft.com/en-us/windows/security/user-account-control-settings">Windows 管理员确认</a>。</p>
+</html>

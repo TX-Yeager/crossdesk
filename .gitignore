@@ -1,0 +1,39 @@
+# Local SSH credentials, private testing material and application identities.
+.local/
+.state/
+state/
+transport-cert.pem
+transport-key.pem
+transport-secret.bin
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+network.json
+settings.json
+status.json
+received-files/
+
+# Local reports and machine-specific SSH maintenance are not repository assets.
+reports/
+/scripts/remote_mac.py
+/scripts/authorize_mac.ps1
+
+# Local environments and generated distribution artifacts.
+.venv/
+.venv-*/
+.runtime/
+build/
+dist/
+*.spec
+*.egg-info/
+*.zip
+*.tar.gz
+*.dmg
+*.crossdesk-update
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+.DS_Store
