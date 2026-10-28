@@ -6,7 +6,7 @@
 
 ## 安装包与权限
 
-下载 [0.2.10-rc1 预发布版本](https://github.com/TX-Yeager/crossdesk/releases/tag/v0.2.10-rc1)：[Windows 安装程序](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.10-rc1/CrossDesk-0.2.10-rc1-Windows-x64-Setup.exe) · [Mac Apple Silicon DMG](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.10-rc1/CrossDesk-macOS-arm64.dmg)。私有仓库的下载需要登录获授权的 GitHub 账号。
+下载 [0.2.10-rc1 预发布版本](https://github.com/TX-Yeager/crossdesk/releases/tag/v0.2.10-rc1)：[Windows 安装程序](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.10-rc1/CrossDesk-0.2.10-rc1-Windows-x64-Setup.exe) · [Mac Apple Silicon DMG](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.10-rc1/CrossDesk-macOS-arm64.dmg)。仓库与安装包均已公开，无需登录即可查看或下载。
 
 新电脑优先使用 Windows Setup 或 macOS Apple Silicon DMG。[完整安装与权限说明](installer/INSTALL.html)随安装包提供。Windows 安装向导默认配置 CrossDesk 的防火墙规则，只需一次管理员确认；规则限定专用网络、同一子网的 TCP 48193 和 UDP 48194。取消授权后可从开始菜单运行“修复局域网连接”。Mac 需手动开启辅助功能、输入监控，并允许出现的本地网络请求。
 
