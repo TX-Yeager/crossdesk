@@ -518,6 +518,11 @@ class AppTests(unittest.TestCase):
                 entered.set()
                 release.wait(1)
             with patch.object(app.engine,"set_enabled",side_effect=wait_enabled) as enabled:
+                with patch.object(app,"_connect_selected_peer") as connect:
+                    app._toggle()
+                    connect.assert_called_once_with()
+                    enabled.assert_not_called()
+                app.transport._connected.set()  # Authenticated test session; no native input.
                 app._toggle()
                 self.assertTrue(entered.wait(1))
                 app._toggle()
