@@ -1,6 +1,6 @@
 import ctypes as C,sys,unittest
 from unittest.mock import Mock
-from crossdesk.backends.windows_cursor import WindowsCursor,WindowClass,CursorInfo
+from crossdesk.backends.windows_cursor import WindowsCursor,WindowClass,CursorInfo,_WindowsCursorAPI
 
 class FakeCursor:
     def __init__(self):self.visible=True;self.events=[]
@@ -31,20 +31,29 @@ class WindowsCursorTests(unittest.TestCase):
     def test_restore_failure_is_not_silently_ignored_before_click(self):
         self.cursor.update(True);self.native.hide=Mock(side_effect=OSError('test'))
         with self.assertRaises(OSError):self.cursor.ensure_visible()
-    def test_return_stays_hidden_until_edge_position_is_committed(self):
-        self.cursor.ensure_hidden()
-        def committed(x,y):
-            self.assertFalse(self.native.visible)
-            self.assertEqual((x,y),(0,830))
-            return len(self.native.at_position.mock_calls)>1
-        self.native.at_position=Mock(side_effect=committed)
-        self.cursor.restore_after_position(0,830)
-        self.assertEqual(self.native.at_position.call_count,2)
-        self.assertTrue(self.native.visible)
+    def test_null_cursor_image_is_hidden_even_when_visibility_counter_is_showing(self):
+        api=_WindowsCursorAPI.__new__(_WindowsCursorAPI)
+        api.u=Mock()
+        for flags,handle,expected in ((1,0,True),(1,123,False),(0,123,True),(2,123,True)):
+            def state(pointer):
+                info=C.cast(pointer,C.POINTER(CursorInfo)).contents
+                info.flags,info.hCursor=flags,handle
+                return True
+            api.u.GetCursorInfo.side_effect=state
+            self.assertEqual(api.hidden(),expected)
     def test_fast_recross_hides_even_during_previous_return_guard(self):
         self.cursor.update(True);self.cursor.ensure_visible()
         self.cursor.ensure_hidden()
         self.assertTrue(self.cursor.hidden)
+    def test_native_window_owns_only_one_balanced_visibility_decrement(self):
+        api=_WindowsCursorAPI.__new__(_WindowsCursorAPI)
+        api.u=Mock();api.window=1;api._visibility_owned=False
+        api.u.SetThreadDpiAwarenessContext.return_value=None
+        api.u.GetSystemMetrics.return_value=100
+        api._show_now();api._show_now()
+        api.u.ShowCursor.assert_called_once_with(False)
+        api._hide_now();api._hide_now()
+        self.assertEqual([call.args for call in api.u.ShowCursor.call_args_list],[(False,),(True,)])
     @unittest.skipUnless(sys.platform=='win32','Native Windows ABI')
     def test_64bit_cursor_window_abi(self):
         if C.sizeof(C.c_void_p)==8:

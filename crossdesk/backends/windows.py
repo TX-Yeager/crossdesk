@@ -577,7 +577,7 @@ class WindowsBackend:
         if thread_id:
             self._user32.PostThreadMessageW(thread_id, 0x0012, 0, 0)
 
-    def _warp_to(self, x, y, before=None, *, wait=True) -> None:
+    def _warp_to(self, x, y, before=None, *, wait=True, after=None) -> None:
         x, y = self._finite(x), self._finite(y)
         # Metrics are cheap enough for every pointer packet, and follow display
         # hot-plug changes without enumerating monitors on every movement.
@@ -608,6 +608,9 @@ class WindowsBackend:
                 else:
                     self._mouse_input(0x0001 | 0x8000 | 0x4000, x=nx, y=ny)
                 self._wait_warp(pending)
+                if after is not None:
+                    stage='presentation_cleanup'
+                    after()
             except BaseException as exc:
                 self._warp_failed(exc,stage=stage)
                 raise
@@ -616,7 +619,7 @@ class WindowsBackend:
                     self._warp_pending = None
 
     def warp(self, x, y) -> None:
-        self._warp_to(x, y)
+        self._warp_to(x, y, after=getattr(self,'after_pointer_handoff',None))
 
     def park_remote(self,x,y) -> None:
         # Hiding is best effort; only failure to remove an input-receiving
@@ -633,8 +636,6 @@ class WindowsBackend:
             if kind == "position":
                 if event.get('handoff',True):self.warp(event["x"], event["y"])
                 else:self._warp_to(event['x'],event['y'],wait=False)
-                restore=getattr(self,"after_pointer_position",None)
-                if restore is not None:restore(event["x"],event["y"])
             elif kind == "button":
                 button = event["button"]
                 if button not in _BUTTON_FLAGS:

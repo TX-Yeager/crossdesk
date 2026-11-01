@@ -170,7 +170,7 @@ class App:
                     self._cursor_controller=WindowsCursor(self.root)
                     backend.before_pointer_inject=self._cursor_controller.ensure_visible
                     backend.before_remote_anchor=self._cursor_controller.ensure_hidden
-                    backend.after_pointer_position=self._cursor_controller.restore_after_position
+                    backend.after_pointer_handoff=self._cursor_controller.ensure_visible
                     self._cursor_after=self.root.after(8,self._cursor_tick)
                 except Exception:
                     self._cursor_warning="Windows 源光标隐藏不可用，跨屏可继续工作。"

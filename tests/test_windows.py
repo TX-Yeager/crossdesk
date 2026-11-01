@@ -175,13 +175,12 @@ class CursorBeforeInjectionTests(unittest.TestCase):
         backend._input_lock=threading.RLock()
         order=[]
         backend.before_pointer_inject=lambda:order.append('restore')
-        backend.after_pointer_position=lambda x,y:order.append('restore-position')
         backend.warp=lambda x,y:order.append('inject')
         backend.inject({'type':'position','x':1,'y':2})
-        self.assertEqual(order,['inject','restore-position'])
+        self.assertEqual(order,['inject'])
         backend.before_pointer_inject=mock.Mock(side_effect=OSError('cursor unavailable'))
         with self.assertRaises(OSError):backend.inject({'type':'button','button':'left','down':True})
-        self.assertEqual(order,['inject','restore-position'])
+        self.assertEqual(order,['inject'])
 
     def test_remote_parking_hides_before_moving_to_centre(self):
         backend=WindowsBackend.__new__(WindowsBackend)
@@ -290,14 +289,15 @@ class WindowsWarpBarrierTests(unittest.TestCase):
             backend.actual = (0, 600)
             order.append("posted")
 
-        def restore(x, y):
-            self.assertEqual((x, y), backend.actual)
+        def restore():
+            self.assertEqual((0, 600), backend.actual)
             self.assertEqual(backend._reference, backend.actual)
-            self.assertIsNone(backend._warp_pending)
+            self.assertIsNotNone(backend._warp_pending)
+            self.assertEqual(self.move(backend,30,615),1)
             order.append("restore")
 
         backend._mouse_input = send
-        backend.after_pointer_position = restore
+        backend.after_pointer_handoff = restore
         backend.inject({"type": "position", "x": 0, "y": 600})
         self.assertEqual(order, ["posted", "restore"])
         self.assertEqual(backend.delivered, [{"type": "key", "key": "f12", "down": True}])

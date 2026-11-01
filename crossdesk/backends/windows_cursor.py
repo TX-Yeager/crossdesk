@@ -45,15 +45,16 @@ class _WindowsCursorAPI:
             (self.u,'SetLayeredWindowAttributes',[W.HWND,W.DWORD,W.BYTE,W.DWORD],W.BOOL),
             (self.u,'SetWindowPos',[W.HWND,W.HWND,C.c_int,C.c_int,C.c_int,C.c_int,W.UINT],W.BOOL),
             (self.u,'ShowWindow',[W.HWND,C.c_int],W.BOOL),
-            (self.u,'GetPhysicalCursorPos',[C.POINTER(W.POINT)],W.BOOL),
             (self.u,'GetSystemMetrics',[C.c_int],C.c_int),
             (self.u,'SetThreadDpiAwarenessContext',[C.c_void_p],C.c_void_p),
             (self.u,'GetCursorInfo',[C.POINTER(CursorInfo)],W.BOOL),
             (self.u,'SetCursor',[W.HANDLE],W.HANDLE),
+            (self.u,'ShowCursor',[W.BOOL],C.c_int),
             (self.u,'LoadCursorW',[W.HINSTANCE,C.c_void_p],W.HANDLE),
             (self.u,'SendMessageTimeoutW',[W.HWND,W.UINT,W.WPARAM,W.LPARAM,W.UINT,W.UINT,C.POINTER(C.c_size_t)],C.c_ssize_t)):
             fn=getattr(dll,name);fn.argtypes=args;fn.restype=result
         self.owner=self.k.GetCurrentThreadId()
+        self._visibility_owned=False
         self.instance=self.k.GetModuleHandleW(None)
         self.name=f'CrossDesk.Cursor.{os.getpid()}.{id(self)}'
         self.callback=PROC(self._window_message)
@@ -103,21 +104,26 @@ class _WindowsCursorAPI:
             x,y,w,h=(self.u.GetSystemMetrics(i) for i in (76,77,78,79))
             if not self.u.SetWindowPos(self.window,C.c_void_p(-1),x,y,w,h,0x10|0x40):
                 raise C.WinError(C.get_last_error())
+            # This dedicated window thread owns exactly one balanced hide.
+            # SetCursor(NULL) alone can be superseded by a cursor refresh.
+            if not self._visibility_owned:
+                self.u.ShowCursor(False)
+                self._visibility_owned=True
             self.u.SetCursor(None)
         finally:
             if previous:self.u.SetThreadDpiAwarenessContext(previous)
 
-    def at_position(self,x,y):
-        point=W.POINT()
-        if not self.u.GetPhysicalCursorPos(C.byref(point)):raise C.WinError(C.get_last_error())
-        return abs(point.x-x)<=1 and abs(point.y-y)<=1
-
     def hidden(self):
         info=CursorInfo(cbSize=C.sizeof(CursorInfo))
         if not self.u.GetCursorInfo(C.byref(info)):raise C.WinError(C.get_last_error())
-        return not bool(info.flags&1)
+        # SetCursor(NULL) removes the image independently of ShowCursor's
+        # visibility counter. A SHOWING flag with no image is still hidden.
+        return not bool(info.flags&1) or not bool(info.hCursor)
 
     def _hide_now(self):
+        if self._visibility_owned:
+            self.u.ShowCursor(True)
+            self._visibility_owned=False
         self.u.ShowWindow(self.window,0)
         self.u.SetCursor(self.u.LoadCursorW(None,C.c_void_p(32512)))
 
@@ -182,7 +188,6 @@ class _ThreadedCursorAPI:
     def show(self):self._check();self._api.show()
     def hide(self):self._check();self._api.hide()
     def hidden(self):self._check();return self._api.hidden()
-    def at_position(self,x,y):self._check();return self._api.at_position(x,y)
     def close(self):
         if not self._thread.is_alive():return
         self._api.close()
@@ -227,17 +232,6 @@ class WindowsCursor:
         with self._lock:
             self._local_until=0
             self._update(True)
-
-    def restore_after_position(self,x,y):
-        if self._closed or not self._active:return
-        # SendInput queues a tagged move. It may return before Windows commits
-        # that move; never reveal the old centre position during this interval.
-        deadline=time.monotonic()+.15
-        while not self._native.at_position(x,y):
-            if time.monotonic()>=deadline:
-                raise OSError('Returning pointer did not reach its screen edge in time')
-            time.sleep(.001)
-        self.ensure_visible()
 
     def update(self,remote):
         # GUI reconciliation must never wait behind a native handoff.
