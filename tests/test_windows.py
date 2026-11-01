@@ -67,6 +67,19 @@ class WindowsDeltaTests(unittest.TestCase):
         self.assertEqual(backend._reference, (110, 100))
         self.assertEqual(backend._user32.cursor_queries, 0)
 
+    def test_inflight_passed_hook_cannot_overwrite_a_new_worker_parking_origin(self):
+        backend = self.backend(blocked=False)
+        def cross_during_capture(event):
+            # The worker can process a queued edge event before capture returns.
+            backend._reference = (1920, 1080)
+            return False
+        backend._handler = cross_during_capture
+        self.move(backend, 0, 600)
+        self.assertEqual(backend._reference, (1920, 1080))
+        backend._handler = lambda event: backend.delivered.append(event) or True
+        self.move(backend, 1915, 1078)
+        self.assertEqual((backend.delivered[-1]['dx'], backend.delivered[-1]['dy']), (-5, -2))
+
     def test_own_tagged_anchor_updates_reference_before_next_physical_move(self):
         backend = self.backend()
         self.assertEqual(self.move(backend, 500, 500, flags=1, tag=backend._tag), 37)
@@ -157,7 +170,7 @@ class WindowsDeltaTests(unittest.TestCase):
         self.move(backend, 102, 100)
         self.assertEqual(backend.metrics(), {
             "move_seen": 2, "move_zero_delta": 1, "move_nonzero_delta": 1,
-            "own_tag_skipped": 0, "callback_failures": 0,
+            "own_tag_skipped": 0, "callback_failures": 0, "stale_move_skipped": 0,
         })
         self.assertTrue(backend.needs_remote_anchor)
         self.assertTrue(all(type(value) is int for value in backend.metrics().values()))
@@ -194,6 +207,23 @@ class CursorBeforeInjectionTests(unittest.TestCase):
         self.assertEqual(order,['hide',('park',1920,1080)])
 
 class WindowsWarpBarrierTests(unittest.TestCase):
+    def test_late_pre_warp_hook_sample_cannot_become_a_centre_to_edge_jump(self):
+        backend=self.backend()
+        backend._kernel32=SimpleNamespace(GetTickCount=lambda:1000)
+        backend._user32.SetPhysicalCursorPos=lambda x,y:setattr(backend,'actual',(x,y)) or True
+        backend.park_remote(1920,1080)
+        def sample(x,y,tick):
+            data=_MSLLHOOKSTRUCT();data.pt.x=x;data.pt.y=y;data.time=tick
+            return backend._mouse_callback(0,0x0200,ctypes.addressof(data))
+        self.assertEqual(sample(0,600,999),1)
+        self.assertEqual(backend.delivered,[])
+        self.assertEqual(sample(1915,1078,1000),1)
+        self.assertEqual((backend.delivered[-1]['dx'],backend.delivered[-1]['dy']),(-5,-2))
+        self.assertEqual(backend.metrics()['stale_move_skipped'],1)
+        backend._motion_not_before=0xfffffff0
+        sample(1921,1081,5)
+        self.assertEqual((backend.delivered[-1]['dx'],backend.delivered[-1]['dy']),(1,1))
+
     def test_handoff_uses_physical_setter_and_allows_its_untagged_target_notification(self):
         backend=self.backend()
         def setter(x,y):

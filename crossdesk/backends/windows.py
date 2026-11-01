@@ -178,6 +178,7 @@ class WindowsBackend:
         self._wheel_residual = [0.0, 0.0]
         self._reference: tuple[int, int] | None = None
         self._warp_pending: _WarpPending | None = None
+        self._motion_not_before = None
         self._reset_metrics()
         self._set_process_dpi_awareness()
 
@@ -212,6 +213,7 @@ class WindowsBackend:
             function = getattr(u, name)
             function.argtypes, function.restype = args, result
         k.GetCurrentThreadId.argtypes, k.GetCurrentThreadId.restype = [], wintypes.DWORD
+        k.GetTickCount.argtypes, k.GetTickCount.restype = [], wintypes.DWORD
         k.GetModuleHandleW.argtypes, k.GetModuleHandleW.restype = [wintypes.LPCWSTR], wintypes.HMODULE
         if hasattr(u, "SetThreadDpiAwarenessContext"):
             u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
@@ -257,12 +259,13 @@ class WindowsBackend:
         self._move_nonzero_delta = 0
         self._own_tag_skipped = 0
         self._callback_failures = 0
+        self._stale_move_skipped = 0
 
     def metrics(self) -> dict[str, int]:
         """Aggregate counts only; never expose positions, keys or payloads."""
         return {name: getattr(self, "_" + name, 0)
                 for name in ("move_seen", "move_zero_delta", "move_nonzero_delta",
-                             "own_tag_skipped", "callback_failures")}
+                             "own_tag_skipped", "callback_failures", "stale_move_skipped")}
 
     def screens(self) -> list[dict]:
         result: list[dict] = []
@@ -315,6 +318,27 @@ class WindowsBackend:
                 raise ctypes.WinError(ctypes.get_last_error())
         return point.x, point.y
 
+    @property
+    def _reference(self):
+        origin = getattr(self, '_reference_origin', None)
+        observed = getattr(self, '_reference_observed', None)
+        if origin is None:
+            return None
+        return observed[1] if observed and observed[0] is origin else origin[0]
+
+    @_reference.setter
+    def _reference(self, point):
+        # Worker-owned baseline. An in-flight hook may finish after this store;
+        # its observation still belongs to the old object and cannot undo it.
+        self._reference_origin = (point,)
+
+    @_reference.deleter
+    def _reference(self):
+        self._reference_origin = None
+
+    def _observe_reference(self, origin, point):
+        self._reference_observed = (origin, point)
+
     def start(self, handler: Callable[[dict], bool]) -> None:
         if not callable(handler):
             raise TypeError("Input handler must be callable")
@@ -324,6 +348,7 @@ class WindowsBackend:
         # Read once before capture starts. Reading GetCursorPos for the same
         # event inside the hook is not a stable relative-motion baseline.
         self._reference = self.position()
+        self._motion_not_before = None
         self._reset_metrics()
         self._last_error = None
         self.failure_reason = None
@@ -390,10 +415,11 @@ class WindowsBackend:
             return self._user32.CallNextHookEx(None, code, message, address)
         try:
             data = ctypes.cast(address, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
+            origin = getattr(self, '_reference_origin', None)
             if data.dwExtraInfo == self._tag:
                 self._own_tag_skipped = getattr(self, "_own_tag_skipped", 0) + 1
                 if message == 0x0200:
-                    self._reference = data.pt.x, data.pt.y
+                    self._observe_reference(origin, (data.pt.x, data.pt.y))
                     pending = getattr(self, "_warp_pending", None)
                     if pending and self._near_point(self._reference, pending.target):
                         pending.seen.set()
@@ -402,12 +428,20 @@ class WindowsBackend:
                 # Foreign injected mouse events are local input, not physical
                 # ownership requests. Follow their location without forwarding.
                 if message == 0x0200:
-                    self._reference = data.pt.x, data.pt.y
+                    self._observe_reference(origin, (data.pt.x, data.pt.y))
                 return self._user32.CallNextHookEx(None, code, message, address)
             event = None
             point = None
             if message == 0x0200:
                 self._move_seen = getattr(self, "_move_seen", 0) + 1
+                cutoff=getattr(self,'_motion_not_before',None)
+                # Hook delivery can lag behind an already completed cursor
+                # transition. Such a sample belongs to the old native origin,
+                # even though Engine.capture now sees the new route generation.
+                # DWORD wrap and same-tick hardware samples remain valid.
+                if cutoff is not None and ((int(data.time)-cutoff)&0xffffffff)>0x7fffffff:
+                    self._stale_move_skipped=getattr(self,'_stale_move_skipped',0)+1
+                    return 1
                 point = data.pt.x, data.pt.y
                 pending=getattr(self,'_warp_pending',None)
                 if pending is not None and self._near_point(point,pending.target):
@@ -417,6 +451,7 @@ class WindowsBackend:
                     # Fail open if a lightweight test backend or unexpected
                     # callback lacks the startup reference; never guess a delta.
                     self._reference = reference = point
+                    origin = self._reference_origin
                 dx, dy = point[0] - reference[0], point[1] - reference[1]
                 if not dx and not dy:
                     self._move_zero_delta = getattr(self, "_move_zero_delta", 0) + 1
@@ -446,7 +481,7 @@ class WindowsBackend:
             if event is not None and handler is not None and handler(event):
                 return 1
             if point is not None:
-                self._reference = point
+                self._observe_reference(origin, point)
         except BaseException as exc:
             self._callback_failures = getattr(self, "_callback_failures", 0) + 1
             self._fail_open(exc)
@@ -611,6 +646,9 @@ class WindowsBackend:
                 if after is not None:
                     stage='presentation_cleanup'
                     after()
+                clock=getattr(getattr(self,'_kernel32',None),'GetTickCount',None)
+                if clock is not None:
+                    self._motion_not_before=int(clock())&0xffffffff
             except BaseException as exc:
                 self._warp_failed(exc,stage=stage)
                 raise

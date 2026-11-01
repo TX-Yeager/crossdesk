@@ -9,6 +9,7 @@ from .geometry import Desktop, Screen, number
 from .scroll import ScrollCurve
 from .gestures import ACTIONS as GESTURE_ACTIONS
 from .session import stop_reason
+from .routing_queue import RoutingQueue
 from . import diagnostics
 
 MODIFIERS = {p+s for p in ("ctrl_", "shift_", "alt_", "meta_") for s in ("l", "r")}
@@ -24,7 +25,7 @@ class Engine:
         self.backend, self.machine, self.notify = backend, machine, notify
         self.transport = None
         self.lock = threading.RLock()
-        self.events = queue.Queue(4096)
+        self.events = RoutingQueue(4096)
         self.closed = threading.Event()
         self.emergency = threading.Event()
         self._emergency_reason='emergency'

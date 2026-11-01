@@ -1297,7 +1297,7 @@ class App:
                         raw=getattr(self.backend,"metrics",lambda:{})()
                         allowed=("move_seen","move_zero_delta","move_nonzero_delta","own_tag_skipped","callback_failures","tap_enabled",
                                  "gesture_sequences","gesture_forwarded","gesture_task_view","gesture_start_menu",
-                                 "warp_suppressed_moves","warp_timeouts")
+                                 "warp_suppressed_moves","warp_timeouts","stale_move_skipped")
                         self._diagnostic_metrics={key:raw[key] for key in allowed if key in raw and
                                                   (isinstance(raw[key],bool) or type(raw[key]) is int and raw[key]>=0)}
                     except Exception:
@@ -1323,6 +1323,8 @@ class App:
         payload["pointer_owner"]=self.engine.pointer_owner
         payload['cursor_phase']=getattr(self._cursor_controller,'_phase',None)
         payload['session_state']=self.engine.session_state
+        payload['queued_events']=self.engine.events.qsize()
+        payload['pointer_coalesced']=getattr(self.engine.events,'pointer_coalesced',0)
         target=self.engine.desktop.by_id.get(self.engine.current)
         payload['routing_mode']=('receiving' if self.engine.incoming else
                                  'sending' if target and target.machine!=self.engine.machine['id'] else 'local')

@@ -262,6 +262,48 @@ class EngineTests(unittest.TestCase):
         self.assertAlmostEqual(win.cursor[0]-initial,20)
         self.assertFalse(any(row["type"]=="reclaim" for row in mac.transport.sent))
 
+    def test_fast_windows_roundtrips_keep_both_owners_in_agreement(self):
+        win, mac = self.pair()
+        for _ in range(200):
+            self.move(win, 100, point=(99, 50))
+            self.pump(win, mac)
+            self.assertEqual((win.pointer_owner, mac.pointer_owner), ('mac', 'mac'))
+            self.assertTrue(mac.incoming)
+            for dx in (15, 25, -20, -10):
+                self.move(win, dx)
+            self.pump(win, mac)
+            self.move(win, -100)
+            self.pump(win, mac)
+            self.assertEqual((win.pointer_owner, mac.pointer_owner), ('win', 'win'))
+            self.assertFalse(mac.incoming)
+            self.assertTrue(win.enabled and mac.enabled)
+
+    def test_busy_receiver_applies_latest_position_before_click_and_release(self):
+        win, mac = self.pair()
+        self.move(win, 80)
+        self.pump(win, mac)
+        screen = win.desktop.by_id[win.current]
+        base = win._pointer_message('pointer', screen)
+        mac.backend.injected.clear()
+        for n in range(8000):
+            mac.receive({**base, 'u': n / 8000, 'v': .25})
+        mac.receive({'type': 'input', 'event': {'type': 'button', 'button': 'left', 'down': True}})
+        mac.receive({'type': 'input', 'event': {'type': 'button', 'button': 'left', 'down': False}})
+        for n in range(8000):
+            mac.receive({**base, 'u': .75, 'v': n / 8000})
+        mac.receive({'type': 'release'})
+        self.assertEqual(mac.events.qsize(), 5)
+        while not mac.events.empty():
+            kind, event = mac.events.get_nowait()
+            self.assertEqual(kind, 'network')
+            mac._network(event)
+        positions = [e for e in mac.backend.injected if e['type'] == 'position']
+        self.assertEqual(len(positions), 2)
+        self.assertAlmostEqual(positions[0]['x'], 99 * 7999 / 8000)
+        self.assertAlmostEqual(positions[1]['y'], 99 * 7999 / 8000)
+        self.assertEqual([e['type'] for e in mac.backend.injected], ['position', 'button', 'button', 'position'])
+        self.assertFalse(mac.incoming or mac.backend.buttons or mac.emergency.is_set())
+
     def test_native_move_queued_before_handoff_cannot_jump_back_after_focus(self):
         win,mac=self.pair()
         self.assertFalse(win.capture({"type":"move","x":99,"y":50,"dx":49,"dy":0}))
