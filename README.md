@@ -12,6 +12,8 @@
 
 安装包属于预览版本，尚无 Windows 商业代码签名和 Apple Developer ID 公证，首次打开可能显示系统提示。仅构建验证 Windows x64 与 Mac Apple Silicon / arm64，未验证 Intel Mac。已有安装优先使用签名功能更新包，保留固定入口和权限身份。
 
+完整安装包自带运行时，使用者不需要安装 Python，也不需要开发机的账号、IP 或配对记录。每台电脑首次运行会生成自己的设备身份；Windows 防火墙规则按实际安装路径生成。2026-11-01 对 0.2.11-rc1 完整包补做了空配置、独立目录与清除开发环境变量的启动验证：Windows 11 x64、macOS 15.6.1 arm64 均通过，两个独立配置的设备 ID、证书和密钥均不同，Mac 原生库未引用构建机器的外部目录。这是现有机器上的隔离验证，不能替代第三台新电脑的权限、防火墙、发现和实际跨屏验收；其他系统版本、Intel Mac 与 Windows ARM 尚未验证。
+
 ## 开始使用
 
 1. 两台电脑连接同一可信局域网，先在两边启动 CrossDesk。Windows 打包版运行 `dist/CrossDesk/CrossDesk.exe`，整个目录和 `_internal` 必须一起保留。源码版双击 `Start-Windows.cmd`。
@@ -100,6 +102,20 @@ bash scripts/build_macos.sh
 Mac 构建在 Mac 本机生成 `dist/v<版本>/CrossDesk.app`；构建架构跟随本机 Python，不宣称已生成通用二进制。固定入口是根目录 `runtime_host.py` 与 `trustedhost.py`，打包时显式收集业务模块和图片编解码依赖。PyInstaller 必须分别在 Windows 和 Mac 构建，不能在 Windows 直接产出可运行的 Mac 应用。[PyInstaller 官方构建说明](https://pyinstaller.org/en/stable/usage.html)
 
 每次发布必须同时提供 Windows 完整 ZIP、macOS Apple Silicon 完整 ZIP 与 DMG、签名更新包、源码包与 SHA256 校验文件，统一保存在 `dist/releases/<版本>/`。完整包用于新安装；已安装用户优先导入签名更新包，保留固定程序与输入权限身份。不得仅更新功能包而遗漏两端完整安装包。
+
+新安装验收使用实际发布包，分别在匹配的平台运行以下命令；工作目录必须不存在。检查会创建两个新配置并启动演示后端，不读取现有配置、不连接局域网、不注入输入；结果保留为工作目录下的 `validation.json`。Python 仅用于运行验收脚本，启动的应用使用包内运行时。
+
+```powershell
+# Windows；把版本和目录替换为待验收发布包
+.venv/Scripts/python.exe scripts/verify_fresh_install.py dist/releases/0.2.11-rc1/CrossDesk-Windows.zip --version 0.2.11-rc1 --work-dir .local/fresh-windows
+```
+
+```bash
+# Mac；从 DMG 只读挂载、复制到测试目录后启动，不覆盖 /Applications
+.venv/bin/python3 scripts/verify_fresh_install.py dist/releases/0.2.11-rc1/CrossDesk-macOS-arm64.dmg --version 0.2.11-rc1 --work-dir .local/fresh-mac
+```
+
+新电脑真机验收还需在没有旧配对记录的两端完成：安装与首次系统提示 → 所需权限 → 同一可信网络内发现 → 两端数字确认 → 鼠标双向跨屏 → 暂停/恢复 → 退出后自动重连。端口被占用、系统拒绝权限、网络隔离、系统安全桌面和高权限应用需单独验证，不能用演示后端或模拟结果宣称通过。
 
 `scripts/package_update.py` 只把 `crossdesk/**/*.py` 组成签名功能更新包，不能替换固定入口或原生依赖。发布私钥仅在忽略的 `.local` 内，不能上传到另一台电脑或进入分发包。固定入口每次启动会先验证签名并从已验证的内存代码加载业务模块。
 

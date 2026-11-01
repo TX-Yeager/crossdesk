@@ -9,7 +9,7 @@ files=[ROOT/name for name in ('README.md','AGENTS.md','requirements.txt','pyproj
 files += sorted((ROOT/'crossdesk').rglob('*.py'))
 files += sorted((ROOT/'tests').rglob('*.py'))
 files += [ROOT/'scripts'/name for name in ('build_windows.ps1','build_macos.sh','package_source.py','package_update.py','package_windows.py')]
-files += [ROOT/'scripts/package_installer.py', ROOT/'tests/test_installer.ps1']
+files += [ROOT/'scripts/package_installer.py', ROOT/'scripts/verify_fresh_install.py', ROOT/'tests/test_installer.ps1']
 files += sorted(path for path in (ROOT/'installer').rglob('*') if path.is_file())
 for path in files:
     parts=path.relative_to(ROOT).parts
