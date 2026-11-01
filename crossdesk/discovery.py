@@ -1,5 +1,6 @@
 """LAN presence only. Discovery packets contain no credentials or input events."""
 import json
+import ipaddress
 import socket
 import threading
 import time
@@ -8,16 +9,43 @@ PORT = 48194
 MAGIC = "crossdesk-lan-v1"
 
 
+def route_address(peer="192.0.2.1"):
+    """Ask the local routing table only; UDP connect sends no network packet."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect((str(ipaddress.IPv4Address(peer)), 9))
+            return probe.getsockname()[0]
+    except (OSError, ValueError):
+        return None
+
+
 def lan_addresses():
     found = set()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = info[4][0]
-            if not ip.startswith("127.") and ip != "0.0.0.0":
+            address=ipaddress.IPv4Address(ip)
+            if not (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast):
                 found.add(ip)
     except OSError:
         pass
-    return sorted(found) or ["127.0.0.1"]
+    preferred=route_address()
+    if preferred and preferred != "127.0.0.1":
+        found.add(preferred)
+    return sorted(found,key=lambda value:(value!=preferred,int(ipaddress.IPv4Address(value)))) or ["127.0.0.1"]
+
+
+def pairing_offer(peer):
+    """Treat broadcasts as untrusted hints, never as pairing credentials."""
+    offer=peer.get("pairing")
+    if not isinstance(offer,dict) or type(offer.get("version")) is not int or offer["version"]!=1:
+        return None
+    port,pin,busy=offer.get("port"),offer.get("pin"),offer.get("busy")
+    if type(port) is not int or not 0<=port<=65535 or type(busy) is not bool:
+        return None
+    if not isinstance(pin,str) or len(pin)!=64 or any(c not in "0123456789abcdef" for c in pin):
+        return None
+    return {"version":1,"port":port,"pin":pin,"busy":busy}
 
 
 class Discovery:
@@ -45,10 +73,16 @@ class Discovery:
                     description = self.describe()
                     packet = json.dumps({"magic": MAGIC, **description}, ensure_ascii=False).encode("utf-8")
                     if len(packet) <= 12000:
-                        try:
-                            sock.sendto(packet, ("255.255.255.255", PORT))
-                        except OSError:
-                            pass
+                        # Bind the sending address explicitly so a virtual adapter
+                        # cannot take all broadcasts away from the physical LAN.
+                        for address in lan_addresses():
+                            try:
+                                with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sender:
+                                    sender.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
+                                    sender.bind((address,0))
+                                    sender.sendto(packet,("255.255.255.255",PORT))
+                            except OSError:
+                                pass
                     next_send = now+3
                 try:
                     packet, addr = sock.recvfrom(12001)

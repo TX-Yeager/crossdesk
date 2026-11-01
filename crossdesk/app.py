@@ -19,10 +19,10 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 
 from crossdesk import __version__
 from crossdesk import diagnostics
-from crossdesk.discovery import Discovery, lan_addresses
+from crossdesk.discovery import Discovery, lan_addresses, route_address, pairing_offer
 from crossdesk.engine import Engine
 from crossdesk.geometry import Desktop, Screen, snap_screen, screen_connections
-from crossdesk.transport import PeerTransport, _parse_pairing_code
+from crossdesk.transport import PeerTransport, _parse_pairing_code, pairing_code, PAIR_CONFIRM_TIMEOUT
 from crossdesk.theme import BG, CARD, INK, MUTED, BLUE, GREEN, apply_theme, rounded_rectangle
 
 
@@ -63,6 +63,9 @@ class App:
         self._network_after = None
         self._network_generation = 0
         self._pending_connect_profile = None
+        self._pairing_connecting = False
+        self._pair_dialog = None
+        self._pair_request = None
         self._profile_save_scheduled = False
         self._toggle_busy = False
         self._last_diagnostic_payload = None
@@ -120,6 +123,8 @@ class App:
         from crossdesk.handoff_effect import HandoffEffect
         self._handoff_effect = HandoffEffect(self.root, enabled=self._handoff_enabled)
         self.transport=PeerTransport(self.state_dir/"identity",self._receive_peer_message,lambda text:self.notify("status",text))
+        self.transport.pairing_handler=self._request_pairing
+        self.transport.local_name=machine["name"][:100]
         self.engine.transport=self.transport
         self.peers={}
         self.machine_names={machine["id"]:machine["name"]+" · 本机"}
@@ -186,7 +191,7 @@ class App:
             self.notify("status","布局演示：可拖动、对齐和缩放显示器；不会捕获或注入任何输入。")
             self.discovery=None
         else:
-            self.discovery=Discovery(self.engine.describe,lambda peer:self.notify("discovered",peer),lambda text:self.notify("status",text))
+            self.discovery=Discovery(self._describe_discovery,lambda peer:self.notify("discovered",peer),lambda text:self.notify("status",text))
             self.discovery.start()
         self._poll_after = self.root.after(80,self._poll)
         if not self.demo:
@@ -333,19 +338,27 @@ class App:
         def label(parent,text,**options):
             return ttk.Label(parent,text=text,style="Card.TLabel",**options)
         label(left,"附近的电脑",font=(font,12,"bold")).pack(anchor="w",pady=(0,5))
-        label(left,"同一局域网，自动发现",foreground=MUTED).pack(anchor="w",pady=(0,13))
-        self.peer_tree=ttk.Treeview(left,columns=("address","screens"),show="tree headings",height=3,selectmode="browse")
+        label(left,"两台打开 CrossDesk，选中后连接",foreground=MUTED).pack(anchor="w",pady=(0,13))
+        self.peer_tree=ttk.Treeview(left,columns=("address","state"),show="tree headings",height=3,selectmode="browse")
         self.peer_tree.heading("#0",text="电脑")
         self.peer_tree.heading("address",text="IP 地址")
-        self.peer_tree.heading("screens",text="屏")
+        self.peer_tree.heading("state",text="状态")
         self.peer_tree.column("#0",width=93,minwidth=60)
-        self.peer_tree.column("address",width=106,minwidth=85)
-        self.peer_tree.column("screens",width=26,minwidth=22,anchor="center")
+        self.peer_tree.column("address",width=100,minwidth=85)
+        self.peer_tree.column("state",width=60,minwidth=50,anchor="center")
         self.peer_tree.pack(fill="x")
-        self.peer_tree.bind("<Double-1>",lambda event:self._add_selected_peer())
-        ttk.Button(left,text="添加显示器",command=self._add_selected_peer).pack(fill="x",pady=(9,22))
-        label(left,"安全连接",font=(font,12,"bold")).pack(anchor="w",pady=(0,5))
-        label(left,"在一端生成配对码，在另一端粘贴。",foreground=MUTED,wraplength=240).pack(anchor="w",pady=(0,13))
+        self.peer_tree.bind("<Double-1>",lambda event:self._connect_selected_peer())
+        self.peer_connect_button=ttk.Button(left,text="连接所选电脑",command=self._connect_selected_peer)
+        self.peer_connect_button.pack(fill="x",pady=(9,6))
+        label(left,"首次核对两端数字并允许；以后自动重连。",foreground=MUTED,wraplength=240).pack(anchor="w",pady=(0,10))
+        ttk.Button(left,text="断开连接",style="Quiet.TButton",command=self._disconnect).pack(fill="x",pady=(0,18))
+        advanced=ttk.Frame(left,style="Card.TFrame")
+        def toggle_advanced():
+            if advanced.winfo_manager():advanced.pack_forget()
+            else:advanced.pack(fill="x",pady=(8,0))
+        ttk.Button(left,text="找不到电脑？手动配对",style="Quiet.TButton",command=toggle_advanced).pack(fill="x")
+        left=advanced
+        label(left,"兼容旧版：生成配对码后在另一端粘贴。",foreground=MUTED,wraplength=240).pack(anchor="w",pady=(0,13))
         label(left,"本机地址",foreground=MUTED).pack(anchor="w")
         addresses=lan_addresses()
         self.address_var=tk.StringVar(value=addresses[0])
@@ -358,7 +371,6 @@ class App:
         ttk.Spinbox(portrow,textvariable=self.port_var,from_=1024,to=65535,width=9).pack(side="right")
         ttk.Button(left,text="生成配对码",command=self._listen).pack(fill="x",pady=4)
         ttk.Button(left,text="粘贴配对码连接",command=self._connect).pack(fill="x",pady=4)
-        ttk.Button(left,text="断开连接",style="Quiet.TButton",command=self._disconnect).pack(fill="x",pady=(6,10))
         label(preferences,"输入与共享",font=(font,12,"bold")).pack(anchor="w",pady=(4,12))
         self.permissions_button=None
         if sys.platform == "darwin" and not self.demo:
@@ -544,22 +556,94 @@ class App:
             except OSError:
                 pass
 
+    def _describe_discovery(self):
+        return {**self.engine.describe(),"pairing":self.transport.discovery_offer()}
+
+    def _auto_listen(self,generation,port=48193):
+        if generation!=self._network_generation or self._closed:
+            return
+        address=lan_addresses()[0]
+        # Receive on every local interface; advertise the physical/default route.
+        self.transport.listen(host="0.0.0.0",port=port,advertise_host=address)
+        self._save_network_profile({"mode":"listen","host":"0.0.0.0","port":port})
+        self.notify("status","正在发现附近电脑 · 选中电脑后点击连接")
+
+    def _request_pairing(self,request):
+        """Network thread waits for a bounded decision; Tk always stays responsive."""
+        request={**request,"done":threading.Event(),"allowed":False,
+                 "expires":time.monotonic()+PAIR_CONFIRM_TIMEOUT,
+                 "generation":self._network_generation}
+        self.notify("pair_request",request)
+        while not request["done"].wait(.1):
+            if self._closed or request["cancel"].is_set() or time.monotonic()>=request["expires"]:
+                request["done"].set()
+                return False
+        return bool(request["allowed"] and not request["cancel"].is_set())
+
+    def _finish_pairing_dialog(self,allowed=False):
+        request=self._pair_request
+        self._pair_request=None
+        if request is not None:
+            request["allowed"]=bool(allowed and not request["done"].is_set()
+                                    and not request["cancel"].is_set()
+                                    and time.monotonic()<request["expires"])
+            request["done"].set()
+            self.status_var.set("已允许，正在等待对方确认连接……" if request["allowed"] else "配对已取消或超时，可稍后重试。")
+        if self._pair_dialog is not None:
+            self._pair_dialog.destroy()
+            self._pair_dialog=None
+
+    def _show_pairing_request(self,request):
+        if (self._closed or request["done"].is_set() or request["cancel"].is_set()
+                or request["generation"]!=self._network_generation or self._pair_dialog is not None):
+            request["done"].set()
+            return
+        self._pair_request=request
+        dialog=self._pair_dialog=tk.Toplevel(self.root)
+        dialog.title("确认连接 · CrossDesk")
+        dialog.transient(self.root)
+        dialog.resizable(False,False)
+        content=ttk.Frame(dialog,padding=24)
+        content.pack(fill="both",expand=True)
+        action="请求连接这台电脑" if request["incoming"] else "等待与你连接"
+        ttk.Label(content,text=request["name"],font=("",15,"bold"),wraplength=460).pack(anchor="w")
+        ttk.Label(content,text=f"{request['address']} · {action}",foreground=MUTED).pack(anchor="w",pady=(6,16))
+        ttk.Label(content,text=request["digits"],font=("",32,"bold"),foreground=BLUE).pack(pady=(0,12))
+        ttk.Label(content,text="请核对另一台电脑显示的数字。\n只有数字一致且是你的电脑，才在两端点击允许。\n连接后，点击“开始互控”才会共享鼠标和键盘。",
+                  wraplength=460,justify="left").pack(anchor="w")
+        self._pair_countdown=tk.StringVar(value="请在 60 秒内确认")
+        ttk.Label(content,textvariable=self._pair_countdown,foreground=MUTED).pack(anchor="w",pady=(12,16))
+        buttons=ttk.Frame(content)
+        buttons.pack(fill="x")
+        ttk.Button(buttons,text="拒绝",command=self._finish_pairing_dialog).pack(side="left")
+        ttk.Button(buttons,text="数字一致，允许连接",command=lambda:self._finish_pairing_dialog(True)).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW",self._finish_pairing_dialog)
+        dialog.lift()
+        self.status_var.set("请核对两台电脑的数字并确认连接")
+
     def _restore_network_profile(self):
         self._network_after=None
-        if self._closed or self.demo or self._network_generation:
+        if self._closed or self.demo or self._network_generation or self.transport.bound_port or self.transport.connected:
             return
         generation=self._network_generation
+        port=int(self.port_var.get())
         def action():
             profile=self._load_network_profile()
-            if not profile or generation!=self._network_generation:
+            if generation!=self._network_generation:
+                return
+            if not profile:
+                if self.network_path.exists():return
+                self._auto_listen(generation,port)
                 return
             self.notify("status","正在恢复上次的加密连接……")
             if profile["mode"]=="listen":
                 host=profile["host"]
-                advertise="" if ipaddress.ip_address(host).is_unspecified else host
-                self.transport.listen(host=host,port=profile["port"],advertise_host=advertise)
+                if ipaddress.ip_address(host).is_loopback:
+                    self.transport.listen(host=host,port=profile["port"],advertise_host=host)
+                else:
+                    self._auto_listen(generation,profile["port"])
             else:
-                self.transport.connect(profile["code"])
+                self.transport.connect(profile["code"],on_rejected=lambda:self.notify("pair_failed",generation))
         self._async(action)
 
     def _remember_connected_profile(self,generation,profile):
@@ -594,6 +678,8 @@ class App:
             messagebox.showerror("端口","请输入 1024–65535 之间的独立端口。",parent=self.root)
             return
         address=self.address_var.get()
+        self._finish_pairing_dialog()
+        self._pairing_connecting=False
         self._network_generation+=1
         generation=self._network_generation
         self._pending_connect_profile=None
@@ -633,6 +719,8 @@ class App:
         code=simpledialog.askstring("连接另一台电脑","粘贴另一台 CrossDesk 生成的完整配对码：",parent=self.root)
         if not code:
             return
+        self._finish_pairing_dialog()
+        self._pairing_connecting=False
         self._network_generation+=1
         generation=self._network_generation
         self._pending_connect_profile=None
@@ -641,12 +729,14 @@ class App:
                 return
             if self.engine.enabled:
                 self.engine.set_enabled(False)
-            self.transport.connect(code.strip())
+            self.transport.connect(code.strip(),on_rejected=lambda:self.notify("pair_failed",generation))
             if generation==self._network_generation:
                 self._pending_connect_profile=(generation,{"mode":"connect","code":code.strip()})
         self._async(action)
 
     def _disconnect(self):
+        self._finish_pairing_dialog()
+        self._pairing_connecting=False
         self._network_generation+=1
         generation=self._network_generation
         self._pending_connect_profile=None
@@ -670,6 +760,9 @@ class App:
             self.status_var.set("演示模式只测试显示器画布，不会捕获输入。")
             return
         if self._toggle_busy:
+            return
+        if not self.transport.connected:
+            self._connect_selected_peer()
             return
         pending=self.engine.control_pending
         enabled=not (self.engine.enabled or pending)
@@ -761,18 +854,73 @@ class App:
             if time.monotonic()-event.get("created_at",0)<0.65:
                 self._handoff_effect.play(event)
 
-    def _add_selected_peer(self):
+    def _connect_selected_peer(self):
+        if self.demo:
+            self.status_var.set("演示模式不会连接其他电脑。")
+            return
+        if self._pairing_connecting or self._pair_request is not None:
+            self.status_var.set("正在配对，请先完成或取消本次连接。")
+            return
+        if self.transport.connected:
+            self.status_var.set("已经连接。切换电脑前请先断开当前连接。")
+            return
         selected=self.peer_tree.selection()
         if not selected:
             self.status_var.set("先在左侧选择一台局域网电脑。")
             return
         peer=self.peers.get(selected[0])
-        if peer:
+        if not peer or time.monotonic()-peer["seen"]>15:
+            self.status_var.set("这台电脑已离线，请确认对方打开了 CrossDesk。")
+            return
+        offer=pairing_offer(peer)
+        if offer is None:
+            self.status_var.set("对方是旧版本，请升级后点击连接，或展开手动配对。")
+            return
+        if offer["busy"] or not offer["port"]:
+            self.status_var.set("对方暂不可连接，请稍后重试；若一直如此，在对方断开连接后重新打开 CrossDesk。")
+            return
+        address=route_address(peer["address"])
+        if address:
+            self.address_combo.configure(values=list(dict.fromkeys([address,*lan_addresses()])))
+            self.address_var.set(address)
+        self._network_generation+=1
+        generation=self._network_generation
+        self._pending_connect_profile=None
+        self._pairing_connecting=True
+        self.status_var.set("正在连接，请在两台电脑上核对数字……")
+        def action():
+            if generation!=self._network_generation:
+                return
             try:
-                self.engine.add_discovered(peer)
-                self.status_var.set("对方显示器已加入画布。可以拖动排列；控制前仍需完成配对。")
-            except (ValueError,KeyError,TypeError,RuntimeError) as exc:
-                self.status_var.set(str(exc))
+                if self.engine.enabled:self.engine.set_enabled(False)
+                self.transport.connect_discovered(peer["address"],offer["port"],offer["pin"],
+                    on_paired=lambda code:self.notify("paired",(generation,code)),
+                    on_failed=lambda:self.notify("pair_failed",generation))
+            except (ValueError,OSError,RuntimeError):
+                self.notify("pair_failed",generation)
+        self._async(action)
+
+    def _refresh_known_address(self,peer):
+        # A broadcast can change the route only for an already pinned identity.
+        # TLS still verifies that pin before releasing the stored credential.
+        if self.transport.connected or self._pairing_connecting or self._pair_request is not None or self._pending_connect_profile:
+            return
+        offer=pairing_offer(peer)
+        if not offer or not offer["port"] or offer["busy"]:
+            return
+        profile=self._load_network_profile()
+        if not profile or profile["mode"]!="connect":return
+        known=_parse_pairing_code(profile["code"])
+        if known["pin"]!=offer["pin"] or (known["host"],known["port"])==(peer["address"],offer["port"]):
+            return
+        known.update(host=peer["address"],port=offer["port"])
+        code=pairing_code(known)
+        generation=self._network_generation
+        def action():
+            if generation!=self._network_generation or self.transport.connected:return
+            self.transport.connect(code,on_rejected=lambda:self.notify("pair_failed",generation))
+            self._pending_connect_profile=(generation,{"mode":"connect","code":code})
+        self._async(action)
 
     def _fit(self):
         self.zoom=1.0
@@ -956,18 +1104,41 @@ class App:
                     self.machine_names[value["id"]]=value["name"]
                 elif kind=="pair_code":
                     self._show_code(value)
+                elif kind=="pair_request":
+                    self._show_pairing_request(value)
+                elif kind=="paired":
+                    generation,code=value
+                    if generation==self._network_generation:
+                        self._pairing_connecting=False
+                        self._pending_connect_profile=(generation,{"mode":"connect","code":code})
+                elif kind=="pair_failed" and value==self._network_generation:
+                    self._pairing_connecting=False
+                    self._finish_pairing_dialog()
+                    self._async(lambda generation=value:self._auto_listen(generation))
                 elif kind=="discovered":
                     mid=value["machine"]["id"]
                     if len(self.peers)<32 or mid in self.peers:
                         self.peers[mid]=value
                         self.machine_names[mid]=value["machine"]["name"]
-                        row=(value["address"],len(value["screens"]))
+                        offer=pairing_offer(value)
+                        state="需升级" if offer is None else ("忙碌" if offer["busy"] else ("可连接" if offer["port"] else "等待对方"))
+                        if self.transport.connected and (self.engine.peer_machine or {}).get("id")==mid:state="已连接"
+                        row=(value["address"],state)
                         if self.peer_tree.exists(mid):
                             self.peer_tree.item(mid,text=value["machine"]["name"],values=row)
                         else:
                             self.peer_tree.insert("","end",iid=mid,text=value["machine"]["name"],values=row)
+                            if not self.peer_tree.selection():self.peer_tree.selection_set(mid)
+                        self._refresh_known_address(value)
         except queue.Empty:
             pass
+        request=self._pair_request
+        if request is not None:
+            remaining=request["expires"]-time.monotonic()
+            if request["done"].is_set() or request["cancel"].is_set() or remaining<=0:
+                self._finish_pairing_dialog()
+            else:
+                self._pair_countdown.set(f"请在 {max(1,int(remaining))} 秒内确认；不一致请拒绝")
         self._update_source_cursor()
         self._update_handoff()
         self._sync_clipboard_preferences()
@@ -1076,8 +1247,11 @@ class App:
         name=self.machine_names.get(target,"另一台电脑")
         self.keyboard_hint_var.set(("键盘 → "+name) if enabled and self.engine.keyboard else
                                    ("键盘留在各自电脑。" if not self.engine.keyboard else "互控开始后，键盘跟随活动光标。"))
-        self.enable_button.configure(text="正在处理…" if self._toggle_busy else ("暂停互控" if enabled or pending else "开始互控"),
-                                     state="disabled" if self._toggle_busy else "normal")
+        pairing=self._pairing_connecting or self._pair_request is not None
+        button_text="暂停互控" if enabled or pending else ("开始互控" if self.transport.connected or self.demo else "选择电脑连接")
+        self.enable_button.configure(text="正在处理…" if self._toggle_busy else ("等待配对确认…" if pairing else button_text),
+                                     state="disabled" if self._toggle_busy or pairing else "normal")
+        self.peer_connect_button.configure(state="disabled" if pairing or self.transport.connected else "normal")
         if self.transport.connected and self.engine.peer_ready:
             peer=self.engine.peer_machine or {}
             if pending:
@@ -1095,7 +1269,7 @@ class App:
             self.connection_var.set(f"已加密连接 · {peer.get('name','另一台电脑')} · {suffix}")
         elif not self.demo:
             self.connection_var.set(self.engine.last_stop['message'] if self.engine.last_stop else
-                                    "尚未配对 · 连接后在任意一端开始双端互控")
+                                    "选择左侧附近的电脑并连接 · 首次需两端确认")
 
     @staticmethod
     def _safe_status_text(value):
@@ -1182,6 +1356,7 @@ class App:
         if self._closed:
             return self.close_error is None
         self._closed=True
+        self._finish_pairing_dialog()
         self._cancel_handoff()
         if self._handoff_effect is not None:
             self._handoff_effect.close()

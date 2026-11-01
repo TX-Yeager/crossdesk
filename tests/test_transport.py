@@ -6,6 +6,7 @@ import queue
 import socket
 import struct
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -87,6 +88,109 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([item["n"] for item in right], list(range(30)))
         self.assertEqual({item["side"] for item in left}, {"right"})
         self.assertEqual({item["side"] for item in right}, {"left"})
+
+    def test_discovered_pair_requires_both_approvals_and_remembers_authenticated_code(self):
+        server,left,_=self.peer()
+        client,right,_=self.peer()
+        requests=[]
+        approve=threading.Event()
+        def confirm(request):
+            requests.append(request)
+            return approve.wait(2)
+        server.pairing_handler=client.pairing_handler=confirm
+        server.listen("127.0.0.1",0)
+        codes=[]
+        client.connect_discovered("127.0.0.1",server.bound_port,server.fingerprint,on_paired=codes.append)
+        wait_for(lambda:len(requests)==2)
+        self.assertEqual(requests[0]["digits"],requests[1]["digits"])
+        self.assertRegex(requests[0]["digits"],r"^\d{6}$")
+        self.assertFalse(server.connected or client.connected)
+        self.assertFalse(client.send({"type":"key","key":"a"}))
+        self.assertEqual(left+right+codes,[])
+        self.assertNotIn("secret",server.discovery_offer())
+        approve.set()
+        wait_for(lambda:server.connected and client.connected and len(codes)==1)
+        client.stop()
+        wait_for(lambda:not server.connected)
+        server.pairing_handler=client.pairing_handler=lambda request:self.fail("remembered peer must not prompt")
+        client.connect(codes[0])
+        wait_for(lambda:server.connected and client.connected)
+        self.assertTrue(client.send({"type":"test","n":1}))
+        wait_for(lambda:any(item.get("n")==1 for item in left))
+
+    def test_discovered_pair_decline_on_either_side_does_not_grant_credentials(self):
+        for declined in ("server","client","no_handler"):
+            with self.subTest(declined=declined):
+                server,left,_=self.peer()
+                client,right,_=self.peer()
+                server.pairing_handler=None if declined=="no_handler" else lambda request:declined!="server"
+                client.pairing_handler=lambda request:declined!="client"
+                server.listen("127.0.0.1",0)
+                codes,failed=[],[]
+                client.connect_discovered("127.0.0.1",server.bound_port,server.fingerprint,
+                                          on_paired=codes.append,on_failed=lambda:failed.append(True))
+                wait_for(lambda:bool(failed))
+                self.assertFalse(server.connected or client.connected)
+                self.assertEqual(codes+left+right,[])
+                client.stop()
+                server.stop()
+
+    def test_discovered_pair_wrong_pin_never_prompts_or_grants(self):
+        server,_,_=self.peer()
+        client,_,_=self.peer()
+        prompts,codes,failed=[],[],[]
+        server.pairing_handler=client.pairing_handler=lambda request:prompts.append(request) or True
+        server.listen("127.0.0.1",0)
+        client.connect_discovered("127.0.0.1",server.bound_port,"00"*32,on_paired=codes.append,on_failed=lambda:failed.append(True))
+        wait_for(lambda:bool(failed))
+        self.assertEqual(prompts+codes,[])
+
+    def test_discovered_pair_stop_cancels_wait_without_hanging(self):
+        server,_,_=self.peer()
+        client,_,_=self.peer()
+        prompts=[]
+        def confirm(request):
+            prompts.append(request)
+            request["cancel"].wait(2)
+            return False
+        server.pairing_handler=client.pairing_handler=confirm
+        server.listen("127.0.0.1",0)
+        client.connect_discovered("127.0.0.1",server.bound_port,server.fingerprint)
+        wait_for(lambda:len(prompts)==2)
+        start=time.monotonic()
+        client.stop()
+        server.stop()
+        self.assertLess(time.monotonic()-start,1)
+        self.assertFalse(server._thread.is_alive() or client._thread.is_alive())
+
+    def test_pair_nonce_must_match_commitment_before_prompt(self):
+        server,_,_=self.peer()
+        prompts=[]
+        server.pairing_handler=lambda request:prompts.append(request) or True
+        server.listen("127.0.0.1",0)
+        raw=socket.create_connection(("127.0.0.1",server.bound_port),2)
+        secure=PeerTransport._client_context().wrap_socket(raw,server_hostname=None)
+        self.sockets.append(secure)
+        _recv_frame(secure)
+        secure.sendall(_pack(_envelope("pair_start",commit="00"*32,name="test")))
+        self.assertEqual(_recv_frame(secure)["kind"],"pair_challenge")
+        secure.sendall(_pack(_envelope("pair_reveal",nonce="11"*32)))
+        with self.assertRaises((OSError,ValueError)):_recv_frame(secure)
+        self.assertEqual(prompts,[])
+
+    def test_discovered_pair_confirmation_timeout_never_connects(self):
+        server,_,_=self.peer()
+        client,_,_=self.peer()
+        server.pairing_handler=lambda request:time.sleep(.25) or True
+        client.pairing_handler=lambda request:True
+        codes,failed=[],[]
+        server.listen("127.0.0.1",0)
+        with patch("crossdesk.transport.PAIR_CONFIRM_TIMEOUT",.1):
+            client.connect_discovered("127.0.0.1",server.bound_port,server.fingerprint,on_paired=codes.append,on_failed=lambda:failed.append(True))
+            wait_for(lambda:bool(failed))
+            time.sleep(.3)
+        self.assertEqual(codes,[])
+        self.assertFalse(server.connected or client.connected)
 
     def test_both_tls_directions_send_small_input_packets_without_nagle(self):
         listener,connector,*_=self.pair()

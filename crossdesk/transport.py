@@ -38,6 +38,7 @@ MAX_PACKETS_PER_SECOND = 12000  # Accommodate 8 kHz input plus control/ACK traff
 QUEUE_SIZE = 2048
 HANDSHAKE_TIMEOUT = 3.0
 HEARTBEAT_INTERVAL = 1.0
+PAIR_CONFIRM_TIMEOUT = 60.0
 IDLE_TIMEOUT = 6.0
 PAIRING_PREFIX = "crossdesk://v1/"
 _PROTOCOL = "crossdesk"
@@ -253,16 +254,26 @@ def _installation_identity(state_dir: Path) -> tuple[Path, Path, bytes, str]:
 def _advertised_ip(bind_host: str) -> str:
     if bind_host not in ("0.0.0.0", "::", ""):
         return str(ipaddress.ip_address(socket.gethostbyname(bind_host)))
-    # Resolve local interfaces only; never contact a public service for discovery.
-    try:
-        addresses = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)
-    except OSError:
-        return "127.0.0.1"
-    for item in addresses:
-        address = ipaddress.ip_address(item[4][0])
-        if not address.is_loopback and not address.is_link_local:
-            return str(address)
-    return "127.0.0.1"
+    from crossdesk.discovery import lan_addresses
+    return lan_addresses()[0]
+
+
+def _pair_name(value):
+    if not isinstance(value,str) or not 0<len(value)<=100 or not value.isprintable() or not value.strip():
+        raise ProtocolError("设备名称无效")
+    return value
+
+
+def _pair_digits(pin, client_nonce, server_nonce, client_name, server_name):
+    transcript=json.dumps(["crossdesk-confirm-v1",pin,client_nonce.hex(),server_nonce.hex(),
+                           client_name,server_name],ensure_ascii=True,separators=(",",":")).encode()
+    value=int.from_bytes(hashlib.sha256(transcript).digest()[:4],"big")%1000000
+    return f"{value:06d}"
+
+
+def pairing_code(peer):
+    fields={key:peer[key] for key in ("host","port","pin","secret")}
+    return PAIRING_PREFIX+base64.urlsafe_b64encode(json.dumps(fields,separators=(",",":")).encode()).decode().rstrip("=")
 
 
 class PeerTransport:
@@ -270,7 +281,8 @@ class PeerTransport:
 
     ``send`` only validates and enqueues; a full queue requests disconnection so
     a dropped key-up cannot leave the remote computer with a held key. Callbacks
-    execute in a network thread and should enqueue work, never block.
+    execute in a network thread. Only the bounded first-pairing confirmation
+    callback may wait for a user decision; input/status callbacks never block.
     """
 
     def __init__(self, state_dir: Path, on_message: Callable[[dict], None],
@@ -291,6 +303,95 @@ class PeerTransport:
         self._lifecycle_lock = threading.RLock()
         self._is_listener = False
         self.bound_port = 0
+        self.pairing_handler = None
+        self.local_name = socket.gethostname()[:100]
+        self._pairing_busy = False
+        self._pairing_after = 0.0
+
+    def discovery_offer(self):
+        # Public identity only. The secret is never included in discovery.
+        return {"version":1,"port":self.bound_port if self._listener is not None else 0,
+                "pin":self._fingerprint,"busy":bool(self.connected or self._pairing_busy or time.monotonic()<self._pairing_after)}
+
+    def connect_discovered(self, host, port, pin, *, on_paired=lambda code:None, on_failed=lambda:None):
+        ipaddress.ip_address(host)
+        _hex_bytes(pin,32)
+        if type(port) is not int or not 1<=port<=65535:
+            raise ValueError("设备连接端口无效")
+        with self._lifecycle_lock:
+            self._prepare()
+            self._is_listener=False
+            peer={"host":host,"port":port,"pin":pin}
+            self._thread=threading.Thread(target=self._connect_loop,args=(peer,on_paired,on_failed),
+                                          name="crossdesk-connect",daemon=True)
+            self._thread.start()
+
+    def _confirm_pairing(self, **request):
+        if self.pairing_handler is None or self._stop_event.is_set():
+            raise ProtocolError("需要在两台电脑上确认配对")
+        request["cancel"]=self._stop_event
+        if not self.pairing_handler(request) or self._stop_event.is_set():
+            raise ProtocolError("配对已拒绝或取消")
+
+    def _pair_server(self, sock, request):
+        if self.pairing_handler is None or time.monotonic()<self._pairing_after:
+            raise ProtocolError("暂时无法接受新配对，请稍后重试")
+        if set(request)!={"protocol","version","kind","commit","name"}:
+            raise ProtocolError("配对请求无效")
+        commitment=_hex_bytes(request["commit"],32)
+        client_name=_pair_name(request["name"])
+        server_name=_pair_name(self.local_name)
+        # The initiator commits its random nonce BEFORE we choose ours.
+        # This prevents an intermediary from grinding a matching short code
+        # offline after learning the other connection's comparison code.
+        server_nonce=secrets.token_bytes(32)
+        deadline=time.monotonic()+HANDSHAKE_TIMEOUT
+        sock.sendall(_pack(_envelope("pair_challenge",nonce=server_nonce.hex(),name=server_name)))
+        reveal=_recv_frame(sock,deadline)
+        if set(reveal)!={"protocol","version","kind","nonce"} or reveal["kind"]!="pair_reveal":
+            raise ProtocolError("配对确认无效")
+        client_nonce=_hex_bytes(reveal["nonce"],32)
+        if not hmac.compare_digest(commitment,hashlib.sha256(client_nonce).digest()):
+            raise ProtocolError("配对确认无效")
+        self._pairing_busy=True
+        self._pairing_after=time.monotonic()+15.0
+        try:
+            deadline=time.monotonic()+PAIR_CONFIRM_TIMEOUT
+            self._confirm_pairing(name=client_name,address=sock.getpeername()[0],incoming=True,
+                                  digits=_pair_digits(self._fingerprint,client_nonce,server_nonce,client_name,server_name))
+            accepted=_recv_frame(sock,deadline)
+            if set(accepted)!={"protocol","version","kind"} or accepted["kind"]!="pair_accept":
+                raise ProtocolError("对方未确认配对")
+            sock.settimeout(HANDSHAKE_TIMEOUT)
+            # Only both approvals can release the existing LAN credential.
+            sock.sendall(_pack(_envelope("pair_granted",secret=self._secret.hex())))
+        finally:
+            self._pairing_busy=False
+
+    def _pair_client(self, sock, peer):
+        client_name=_pair_name(self.local_name)
+        client_nonce=secrets.token_bytes(32)
+        sock.sendall(_pack(_envelope("pair_start",commit=hashlib.sha256(client_nonce).hexdigest(),name=client_name)))
+        response=_recv_frame(sock)
+        if set(response)!={"protocol","version","kind","nonce","name"} or response["kind"]!="pair_challenge":
+            raise ProtocolError("对方版本不支持点击配对，请升级或使用配对码")
+        server_nonce=_hex_bytes(response["nonce"],32)
+        server_name=_pair_name(response["name"])
+        sock.sendall(_pack(_envelope("pair_reveal",nonce=client_nonce.hex())))
+        self._pairing_busy=True
+        try:
+            deadline=time.monotonic()+PAIR_CONFIRM_TIMEOUT
+            self._confirm_pairing(name=server_name,address=peer["host"],incoming=False,
+                                  digits=_pair_digits(peer["pin"],client_nonce,server_nonce,client_name,server_name))
+            sock.settimeout(HANDSHAKE_TIMEOUT)
+            sock.sendall(_pack(_envelope("pair_accept")))
+            grant=_recv_frame(sock,deadline)
+            if set(grant)!={"protocol","version","kind","secret"} or grant["kind"]!="pair_granted":
+                raise ProtocolError("对方未允许配对")
+            _hex_bytes(grant["secret"],32)
+            peer["secret"]=grant["secret"]
+        finally:
+            self._pairing_busy=False
 
     @property
     def connected(self) -> bool:
@@ -347,12 +448,12 @@ class PeerTransport:
                 raise OSError(result["error"])
             return result["code"]
 
-    def connect(self, code: str) -> None:
+    def connect(self, code: str, *, on_rejected=None) -> None:
         peer = _parse_pairing_code(code.strip())
         with self._lifecycle_lock:
             self._prepare()
             self._is_listener = False
-            self._thread = threading.Thread(target=self._connect_loop, args=(peer,),
+            self._thread = threading.Thread(target=self._connect_loop, args=(peer,),kwargs={"on_rejected":on_rejected},
                                             name="crossdesk-connect", daemon=True)
             self._thread.start()
 
@@ -448,6 +549,10 @@ class PeerTransport:
         sock.settimeout(HANDSHAKE_TIMEOUT)
         sock.sendall(_pack(_envelope("challenge", nonce=server_nonce.hex())))
         response = _recv_frame(sock, deadline)
+        if response.get("kind")=="pair_start":
+            self._pair_server(sock,response)
+            deadline=time.monotonic()+HANDSHAKE_TIMEOUT
+            response=_recv_frame(sock,deadline)
         if set(response) != {"protocol", "version", "kind", "nonce", "proof"} or response["kind"] != "authenticate":
             raise ProtocolError("对端未通过配对认证")
         client_nonce = _hex_bytes(response["nonce"], 32)
@@ -463,12 +568,15 @@ class PeerTransport:
         actual_pin = hashlib.sha256(certificate).digest()
         if not hmac.compare_digest(actual_pin, _hex_bytes(peer["pin"], 32)):
             raise ProtocolError("证书指纹不匹配，连接已拒绝")
-        secret = _hex_bytes(peer["secret"], 32)
         deadline = time.monotonic() + HANDSHAKE_TIMEOUT
         challenge = _recv_frame(sock, deadline)
         if set(challenge) != {"protocol", "version", "kind", "nonce"} or challenge["kind"] != "challenge":
             raise ProtocolError("对端协议身份不符")
         server_nonce = _hex_bytes(challenge["nonce"], 32)
+        if "secret" not in peer:
+            self._pair_client(sock,peer)
+            deadline=time.monotonic()+HANDSHAKE_TIMEOUT
+        secret = _hex_bytes(peer["secret"],32)
         client_nonce = secrets.token_bytes(32)
         sock.sendall(_pack(_envelope("authenticate", nonce=client_nonce.hex(),
                                      proof=_proof(secret, "client", server_nonce, client_nonce))))
@@ -534,7 +642,7 @@ class PeerTransport:
             self._listener = None
             ready.set()
 
-    def _connect_loop(self, peer: dict) -> None:
+    def _connect_loop(self, peer: dict, on_paired=None, on_failed=None, on_rejected=None) -> None:
         delay = 0.5
         while not self._stop_event.is_set():
             tls = None
@@ -546,14 +654,26 @@ class PeerTransport:
                 tls = self._client_context().wrap_socket(raw, server_hostname=None)
                 self._active_socket = tls
                 self._authenticate_client(tls, peer)
+                if on_paired is not None:
+                    on_paired(pairing_code(peer))
+                    on_paired=None
+                    on_failed=None
                 if not self._stop_event.is_set():
                     delay = 0.5
                     self._session(tls)
             except ProtocolError as exc:
                 # Wrong identity or credentials require deliberate re-pairing.
                 self._status(str(exc))
+                if on_failed is not None:
+                    on_failed()
+                elif on_rejected is not None and not self._stop_event.is_set():
+                    on_rejected()
                 return
             except (OSError, ValueError, TimeoutError) as exc:
+                if on_failed is not None:
+                    self._status("连接未完成：请确认对方仍在线、两端网络允许 CrossDesk 后重试。")
+                    on_failed()
+                    return
                 if not self._stop_event.is_set():
                     self._status(self._error_status(exc))
             finally:

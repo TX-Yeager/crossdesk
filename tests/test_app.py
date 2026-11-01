@@ -158,7 +158,8 @@ class AppTests(unittest.TestCase):
             self.assertTrue(app._save_network_profile(profile))
             with patch.object(app.transport,"connect") as connect:
                 self.wait_for(lambda: connect.called)
-                connect.assert_called_once_with(profile["code"])
+                self.assertEqual(connect.call_args.args,(profile["code"],))
+                self.assertTrue(callable(connect.call_args.kwargs["on_rejected"]))
             app.close()
             self.assertEqual(json.loads(app.network_path.read_text()),profile)
 
@@ -175,6 +176,59 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app._load_network_profile(),{"mode":"connect","code":code})
             self.assertNotIn(code,app.status_var.get())
 
+    def test_fresh_start_is_discoverable_without_pairing_code_dialog(self):
+        with patch("crossdesk.app.Discovery"), patch("crossdesk.app.lan_addresses",return_value=["192.168.0.113"]):
+            app=self.app(demo=False)
+            with patch.object(app.transport,"listen",return_value=self.pairing_code()) as listen, patch.object(app,"_show_code") as show:
+                self.wait_for(lambda:listen.called and app.network_path.exists())
+                listen.assert_called_once_with(host="0.0.0.0",port=48193,advertise_host="192.168.0.113")
+                show.assert_not_called()
+            self.assertFalse(app.engine.enabled or app.backend.running)
+            self.assertEqual(app.enable_button.cget("text"),"选择电脑连接")
+
+    def test_select_discovered_peer_confirm_both_and_reopen_remembers_connection(self):
+        with patch("crossdesk.app.Discovery"):
+            left,right=self.app(demo=False),self.app(demo=False)
+            left._network_generation=1
+            left.transport.listen("127.0.0.1",0)
+            peer={**left._describe_discovery(),"address":"127.0.0.1","seen":time.monotonic()}
+            right.notify("discovered",peer)
+            self.wait_for(lambda:right.peer_tree.exists(left.engine.machine["id"]))
+            right._connect_selected_peer()
+            self.wait_for(lambda:left._pair_dialog is not None and right._pair_dialog is not None)
+            self.assertEqual(left._pair_request["digits"],right._pair_request["digits"])
+            self.assertFalse(left.transport.connected or right.transport.connected)
+            self.assertFalse(right.network_path.exists())
+            left._finish_pairing_dialog(True)
+            self.assertFalse(right.transport.connected)
+            right._finish_pairing_dialog(True)
+            self.wait_for(lambda:left.engine.peer_ready and right.engine.peer_ready and right.network_path.exists())
+            self.assertFalse(left.backend.running or right.backend.running)
+            self.assertFalse(left.engine.enabled or right.engine.enabled)
+            self.assertEqual(right._load_network_profile()["mode"],"connect")
+            state=right.state_dir
+            right.close()
+            self.wait_for(lambda:not left.transport.connected)
+            reopened=self.app(demo=False,state_dir=state)
+            self.wait_for(lambda:reopened.transport.connected and left.transport.connected)
+            self.assertIsNone(reopened._pair_dialog)
+            self.assertFalse(reopened.backend.running or left.backend.running)
+
+    def test_expired_pair_dialog_closes_and_stale_failure_does_not_restart_network(self):
+        with patch("crossdesk.app.Discovery"):
+            app=self.app(demo=False)
+            app._network_generation=1
+            request={"name":"test","address":"127.0.0.1","digits":"123456","incoming":True,
+                     "cancel":threading.Event(),"done":threading.Event(),"allowed":False,
+                     "expires":time.monotonic()+.15,"generation":1}
+            app._show_pairing_request(request)
+            self.wait_for(lambda:app._pair_dialog is None)
+            self.assertTrue(request["done"].is_set())
+            self.assertFalse(request["allowed"])
+            with patch.object(app.transport,"listen") as listen:
+                app.notify("pair_failed",0)
+                self.wait_for(app.messages.empty)
+                listen.assert_not_called()
     def test_manual_listen_remembers_and_disconnect_forgets(self):
         with patch("crossdesk.app.Discovery"):
             app=self.app(demo=False)
