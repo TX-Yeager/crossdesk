@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+from .windows import _INPUT
 
 PROC=getattr(C,'WINFUNCTYPE',C.CFUNCTYPE)(C.c_ssize_t,W.HWND,W.UINT,W.WPARAM,W.LPARAM)
 HIDE_MESSAGE=0x8000+211
@@ -50,6 +51,7 @@ class _WindowsCursorAPI:
             (self.u,'GetCursorInfo',[C.POINTER(CursorInfo)],W.BOOL),
             (self.u,'SetCursor',[W.HANDLE],W.HANDLE),
             (self.u,'ShowCursor',[W.BOOL],C.c_int),
+            (self.u,'SendInput',[W.UINT,C.POINTER(_INPUT),C.c_int],W.UINT),
             (self.u,'LoadCursorW',[W.HINSTANCE,C.c_void_p],W.HANDLE),
             (self.u,'SendMessageTimeoutW',[W.HWND,W.UINT,W.WPARAM,W.LPARAM,W.UINT,W.UINT,C.POINTER(C.c_size_t)],C.c_ssize_t)):
             fn=getattr(dll,name);fn.argtypes=args;fn.restype=result
@@ -110,6 +112,15 @@ class _WindowsCursorAPI:
                 self.u.ShowCursor(False)
                 self._visibility_owned=True
             self.u.SetCursor(None)
+            # Physical remote moves are suppressed by the input hook, so they
+            # cannot trigger a fresh hit test / WM_SETCURSOR for this window.
+            # A zero relative injected move refreshes ownership without warping
+            # the pointer, activating a window, or entering the routing queue.
+            refresh=_INPUT(type=0)
+            refresh.mi.dwFlags=0x0001
+            refresh.mi.dwExtraInfo=0x43524355
+            if self.u.SendInput(1,C.byref(refresh),C.sizeof(_INPUT))!=1:
+                raise OSError('Cursor refresh input was blocked')
         finally:
             if previous:self.u.SetThreadDpiAwarenessContext(previous)
 
@@ -231,6 +242,9 @@ class WindowsCursor:
         """Request presentation once; visibility must never gate input routing."""
         with self._lock:
             self._local_until=0
+            # A new outgoing handoff must retry even if a previous attempt
+            # degraded while another application owned the cursor.
+            self._degraded=False
             self._update(True)
 
     def update(self,remote):
@@ -246,7 +260,9 @@ class WindowsCursor:
             self._degraded=False
             self.warning=None
             return None
-        if self._degraded:return None
+        if self._degraded:
+            if self._clock()<self._retry_at:return None
+            self._degraded=False
         if self._clock()<self._local_until:return None
         try:
             self._update_remote()
@@ -259,6 +275,7 @@ class WindowsCursor:
     def _degrade(self):
         self.ensure_visible()  # A failed removal still propagates: clicks need it.
         self._degraded=True
+        self._retry_at=self._clock()+1.0
         self.warning='源光标隐藏暂不可用，跨屏继续工作；本机可能显示第二个光标。'
 
     def _update_remote(self):
@@ -269,6 +286,7 @@ class WindowsCursor:
         elif self._native.hidden():
             self._hidden=True
             self._deadline=0
+            self.warning=None
             return None
         elif self._hidden:
             # A fresh visibility loss gets its own recovery budget.
@@ -279,7 +297,9 @@ class WindowsCursor:
             self._native.show()
             self._retry_at=self._clock()+.05
         self._hidden=self._native.hidden()
-        if self._hidden:self._deadline=0
+        if self._hidden:
+            self._deadline=0
+            self.warning=None
         if not self._hidden and self._clock()>self._deadline:
             self._degrade()
 

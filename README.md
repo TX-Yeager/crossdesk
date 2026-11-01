@@ -2,11 +2,11 @@
 
 让连接在 Windows 的鼠标、连接在 Mac 的触摸板和两边键盘，通过同一局域网双向控制另一台电脑，并共享文本、图片和文件剪贴板。两台电脑仍各自运行自己的系统，屏幕保留原来的接线。无需订阅或云服务。
 
-**当前版本是 0.2.14-rc1 开发预览版。Windows 与 macOS 的双向跨屏已有真机验证，但偶发跨屏与光标显示问题仍在排查，不能视为稳定版。Mac 的辅助功能与输入监控需用户本机授权。**
+**当前版本是 0.2.15-rc1 开发预览版。Windows 与 macOS 的双向跨屏已有真机验证，但偶发跨屏与光标显示问题仍在排查，不能视为稳定版。Mac 的辅助功能与输入监控需用户本机授权。**
 
 ## 安装包与权限
 
-下载 [0.2.14-rc1 预发布版本](https://github.com/TX-Yeager/crossdesk/releases/tag/v0.2.14-rc1)：[Windows 安装程序](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.14-rc1/CrossDesk-0.2.14-rc1-Windows-x64-Setup.exe) · [Mac Apple Silicon DMG](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.14-rc1/CrossDesk-macOS-arm64.dmg)。仓库与安装包均已公开，无需登录即可查看或下载。
+下载 [0.2.15-rc1 预发布版本](https://github.com/TX-Yeager/crossdesk/releases/tag/v0.2.15-rc1)：[Windows 安装程序](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.15-rc1/CrossDesk-0.2.15-rc1-Windows-x64-Setup.exe) · [Mac Apple Silicon DMG](https://github.com/TX-Yeager/crossdesk/releases/download/v0.2.15-rc1/CrossDesk-macOS-arm64.dmg)。仓库与安装包均已公开，无需登录即可查看或下载。
 
 新电脑优先使用 Windows Setup 或 macOS Apple Silicon DMG。[完整安装与权限说明](installer/INSTALL.html)随安装包提供。Windows 安装向导默认配置 CrossDesk 的防火墙规则，只需一次管理员确认；规则限定专用网络、同一子网的 TCP 48193 和 UDP 48194。取消授权后可从开始菜单运行“修复局域网连接”。Mac 需手动开启辅助功能、输入监控，并允许出现的本地网络请求。
 
@@ -78,9 +78,11 @@ Windows 的 UAC 安全桌面、锁屏和高权限应用可能拒绝普通权限�
 
 0.2.14-rc1 修复双端“设备 / 偏好 / 更新”标签切换偏移：清除基础主题选中状态的内边距覆盖，使文字、背景和点击范围在切换时保持固定。
 
+0.2.15-rc1 修复 Windows 源光标隐藏失败后不再重试的问题：临时失败后限频重试，新跨屏立即重试，成功后清除旧警告；隐藏窗口显示时发送零位移鼠标刷新，让系统重新处理光标归属，不改变停泊坐标、系统光标主题或前台焦点。Windows 原生控制器三次隐藏/恢复检查通过，仍保留暂停、退出与返回本机的清理路径。
+
 ## 开发与构建
 
-当前版本为 0.2.14-rc1，需要 Python 3.10+、tkinter，以及 `requirements.txt` 中的 `cryptography>=44,<51` 和 `Pillow>=12,<14`。GUI 使用标准库 Tk，系统输入通过 Windows API / macOS Quartz 调用，Pillow 负责图片剪贴板编解码。建议每个平台独立创建虚拟环境。Windows 与 Mac 的 `.venv` 不能互相复制使用。
+当前版本为 0.2.15-rc1，需要 Python 3.10+、tkinter，以及 `requirements.txt` 中的 `cryptography>=44,<51` 和 `Pillow>=12,<14`。GUI 使用标准库 Tk，系统输入通过 Windows API / macOS Quartz 调用，Pillow 负责图片剪贴板编解码。建议每个平台独立创建虚拟环境。Windows 与 Mac 的 `.venv` 不能互相复制使用。
 
 0.2.9 调整跨屏停止逻辑：源光标隐藏失败只显示提示，继续路由输入；真正的捕获、定位、光标窗口清理或本地焦点恢复失败仍暂停并释放输入。停止原因由引擎记录、同步到另一端并保留到下次开始，不再由界面猜测提示文字。相同布局的新版本消息不再暂停，重复开始不重置当前路由，旧确认不能恢复已暂停的会话。清理旧 Mac 主窗口隐藏策略、无入口的接管分支和 Windows 同步隐藏等待。仍保留 F12、双方确认、输入代次、真实定位校验与流光动效。0.2.10-rc1 补充交接诊断，尚未确认所有偶发问题均已解决。0.2.11-rc1 新增附近电脑点选连接、两端数字确认、启动自动监听与物理网络优先选址；修复首次尚未配对就点击开始时直接报错的问题。
 
