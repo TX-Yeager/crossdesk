@@ -68,7 +68,9 @@ def apply_theme(root, font):
     style.layout("TNotebook.Tab",[("Modern.Notebook.tab",{"sticky":"nsew","children":[
         ("Notebook.padding",{"sticky":"nsew","children":[("Notebook.label",{"sticky":"nsew"})]})]})])
     style.configure("TNotebook.Tab", padding=(16,9), borderwidth=0, background=CARD, foreground=MUTED)
-    style.map("TNotebook.Tab", background=[("selected", "#edf3ff"), ("active", "#f5f7fb")],
+    # Clam maps selected padding to {6 4 6 2}; configure() alone does not
+    # override that map. Keep hit boxes and label positions fixed on selection.
+    style.map("TNotebook.Tab", padding=[], background=[("selected", "#edf3ff"), ("active", "#f5f7fb")],
               foreground=[("selected", BLUE)])
     style.configure("Treeview", rowheight=43, font=(font, 9), background=CARD,
                     fieldbackground=CARD, foreground=INK, borderwidth=0, relief="flat")

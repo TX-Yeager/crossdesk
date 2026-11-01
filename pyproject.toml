@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crossdesk-lan"
-version = "0.2.13-rc1"
+version = "0.2.14-rc1"
 description = "CrossDesk 跨屏：Windows 与 macOS 局域网双向键鼠互控"
 readme = "README.md"
 requires-python = ">=3.10"
